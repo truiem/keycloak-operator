@@ -1,4 +1,4 @@
-name: goreleaser
+name: release
 on:
   push:
     tags:
@@ -9,73 +9,16 @@ on:
 permissions: write-all
 jobs:
   goreleaser:
-    runs-on: ubuntu-latest
-    env:
-      GH_ARTIFACT_PAT: ${{ secrets.PAT }}
-      GOPRIVATE: github.com/gulfcoastdevops
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - run: |
-          git fetch --force --tags
-          git config --global url."https://${GH_ARTIFACT_PAT}@github.com/gulfcoastdevops".insteadOf "https://github.com/gulfcoastdevops"
-      - uses: actions/setup-go@v3
-        with:
-          go-version: '>=1.22.0'
-          cache: true
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ secrets.PAT_USER }}
-          password: ${{ secrets.PAT }}
-      - name: Login to AWS ECR Dev
-        uses: docker/login-action@v3
-        with:
-          registry: 656688821056.dkr.ecr.us-east-1.amazonaws.com
-          username: ${{ secrets.AWS_DEV_KEY_ID }}
-          password: ${{ secrets.AWS_DEV_SECRET_KEY }}
-
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          # list of Docker images to use as base name for tags
-          images: |
-            ghcr.io/gulfcoastdevops/keycloak-operator
-            656688821056.dkr.ecr.us-east-1.amazonaws.com/keycloak-operator
-          # generate Docker tags based on the following events/attributes
-          tags: |
-            type=schedule
-            type=semver,pattern={{version}}
-            type=sha
-
-      - name: Build
-        uses: goreleaser/goreleaser-action@v6
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        with:
-          distribution: goreleaser
-          version: '~> 2'
-          args: release --clean --skip=publish --snapshot
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build & Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: goreleaser/goreleaser-action@v6
-        with:
-          distribution: goreleaser
-          version: '~> 2'
-          args: release --clean
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build & push
-        uses: docker/build-push-action@v4
-        with:
-          file: ./hack/goreleaser/Dockerfile
-          context: ./dist/keycloak-operator_linux_amd64_v1
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+    uses: gulfcoastdevops/workflow-templates/.github/workflows/goreleaser-job.yml@main
+    with:
+      go-version: '>=1.22.0'
+    secrets: inherit
+  docker:
+    needs: goreleaser
+    uses: gulfcoastdevops/workflow-templates/.github/workflows/docker-build-push.yml@main
+    with:
+      image-name: keycloak-operator
+      context: ./dist/keycloak-operator_linux_amd64_v1
+      dockerfile: ./hack/goreleaser/Dockerfile
+      platforms: 'linux/amd64'
+    secrets: inherit
