@@ -1,0 +1,86 @@
+# Invoke after a successful image build; only this run's OCI archive is consumed.
+# Build/project code never runs on this credentialed runner. Source labels connect GHCR packages.
+name: Publish image from current CI run
+'on':
+  workflow_call:
+    inputs:
+      image-artifact:
+        required: true
+        type: string
+      image-name:
+        required: true
+        type: string
+      image-tag:
+        required: true
+        type: string
+      registry:
+        required: true
+        type: string
+      environment:
+        required: true
+        type: string
+      tag-prefix:
+        type: string
+        default: ''
+      aws-region:
+        type: string
+        default: us-east-1
+permissions:
+  contents: read
+jobs:
+  publish:
+    if: (inputs.environment != 'publish-ecr-prod' || startsWith(github.ref, 'refs/tags/v')) && (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name
+      == github.repository) || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+      id-token: write
+    env:
+      REGISTRY_KIND: ${{ inputs.registry }}
+      IMAGE_NAME: ${{ inputs.image-name }}
+      IMAGE_TAG: ${{ format('{0}{1}', inputs.tag-prefix, inputs.image-tag) }}
+      ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+      OWNER: ${{ github.repository_owner }}
+    steps:
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        name: ${{ inputs.image-artifact }}
+        path: ${{ runner.temp }}/image
+    - name: Validate destination
+      run: "[[ \"$REGISTRY_KIND\" == ghcr || \"$REGISTRY_KIND\" == ecr ]]\n[[ \"$IMAGE_NAME\" =~ ^[a-z0-9][a-z0-9._/-]*$ &&\
+        \ \"$IMAGE_NAME\" != *..* ]]\n[[ \"$IMAGE_TAG\" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]\nif [[ \"$REGISTRY_KIND\"\
+        \ == ecr ]]; then\n  [[ \"$ECR_REGISTRY\" =~ ^[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com$ ]]\nfi\n"
+    - name: Install image-copy tool
+      run: sudo apt-get update -qq && sudo apt-get install -y skopeo
+    - name: Assume AWS publishing role
+      if: inputs.registry == 'ecr'
+      uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708
+      with:
+        role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+        aws-region: ${{ inputs.aws-region }}
+        role-session-name: gha-image-publish
+    - name: Publish and verify image digest
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: "set -euo pipefail\nexport REGISTRY_AUTH_FILE=\"$RUNNER_TEMP/registry-auth.json\"\ntrap 'rm -f \"$REGISTRY_AUTH_FILE\"\
+        ' EXIT\nif [[ \"$REGISTRY_KIND\" == ghcr ]]; then\n  registry=ghcr.io\n  printf '%s' \"$GH_TOKEN\" | skopeo login\
+        \ --username \"$GITHUB_ACTOR\" --password-stdin \"$registry\"\n  destination=\"$registry/${OWNER,,}/$IMAGE_NAME:$IMAGE_TAG\"\
+        \nelse\n  registry=\"$ECR_REGISTRY\"\n  aws ecr get-login-password | skopeo login --username AWS --password-stdin\
+        \ \"$registry\"\n  destination=\"$registry/$IMAGE_NAME:$IMAGE_TAG\"\nfi\nskopeo copy --all --digestfile \"$RUNNER_TEMP/published-digest\"\
+        \ \"oci-archive:$RUNNER_TEMP/image/image.tar\" \"docker://$destination\"\nskopeo inspect --raw \"docker://$destination\"\
+        \ > \"$RUNNER_TEMP/published-manifest\"\nactual=\"sha256:$(sha256sum \"$RUNNER_TEMP/published-manifest\" | cut -d\
+        \ ' ' -f 1)\"\n[[ \"$actual\" == \"$(cat \"$RUNNER_TEMP/published-digest\")\" ]]\nprintf 'Published `%s` at `%s`\\\
+        n' \"$destination\" \"$actual\" >> \"$GITHUB_STEP_SUMMARY\"\n"
+    - name: Verify published source label
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: "set -euo pipefail\nexport REGISTRY_AUTH_FILE=\"$RUNNER_TEMP/verify-auth.json\"\ntrap 'rm -f \"$REGISTRY_AUTH_FILE\"\
+        ' EXIT\nif [[ \"$REGISTRY_KIND\" == ghcr ]]; then\n  registry=ghcr.io\n  printf '%s' \"$GH_TOKEN\" | skopeo login\
+        \ --username \"$GITHUB_ACTOR\" --password-stdin \"$registry\"\n  destination=\"$registry/${OWNER,,}/$IMAGE_NAME:$IMAGE_TAG\"\
+        \nelse\n  registry=\"$ECR_REGISTRY\"\n  aws ecr get-login-password | skopeo login --username AWS --password-stdin\
+        \ \"$registry\"\n  destination=\"$registry/$IMAGE_NAME:$IMAGE_TAG\"\nfi\nsource=\"$(skopeo inspect --config \"docker://$destination\"\
+        \ | jq -r '.config.Labels[\"org.opencontainers.image.source\"]')\"\n[[ \"$source\" == \"https://github.com/$GITHUB_REPOSITORY\"\
+        \ ]]\nprintf 'Image: `%s`\\nSource: `%s`\\n' \"$destination\" \"$source\" >> \"$GITHUB_STEP_SUMMARY\"\n"
