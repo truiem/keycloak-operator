@@ -1,0 +1,29 @@
+# Trusted follow-up: PR artifacts go to ECR dev/GHCR; version tags go to ECR prod.
+name: Publish validated images
+'on':
+  workflow_run:
+    workflows:
+    - Public fork CI
+    types:
+    - completed
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+  packages: write
+  id-token: write
+jobs:
+  keycloak-operator-ecr:
+    uses: ./.github/workflows/publish-image-v2.yml
+    with:
+      registry: ecr
+      image-artifact: image
+      image-name: keycloak-operator
+      build-workflow: .github/workflows/ci.yml
+  keycloak-operator-ghcr:
+    uses: ./.github/workflows/publish-image-v2.yml
+    with:
+      registry: ghcr
+      image-artifact: image
+      image-name: keycloak-operator
+      build-workflow: .github/workflows/ci.yml

@@ -1,0 +1,150 @@
+# Public fork cannot call the private shared library. Synced from shared publisher 5f5204e.
+name: Publish prebuilt image v2
+on:
+  workflow_call:
+    inputs:
+      image-artifact:
+        type: string
+        required: true
+      image-name:
+        type: string
+        required: true
+      registry:
+        description: ghcr for PRs; ecr for PR dev images and tagged production images
+        type: string
+        required: true
+      tag-prefix:
+        description: Optional image discriminator for multiple images sharing one GHCR package
+        type: string
+        default: ''
+      build-workflow:
+        type: string
+        default: .github/workflows/ci.yml
+      aws-region:
+        type: string
+        default: us-east-1
+permissions:
+  contents: read
+jobs:
+  validate:
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      ready: ${{ steps.source.outputs.ready }}
+      environment: ${{ steps.source.outputs.environment }}
+      tag: ${{ steps.source.outputs.tag }}
+      artifact-id: ${{ steps.source.outputs.artifact-id }}
+      run-id: ${{ steps.source.outputs.run-id }}
+    steps:
+      # Trusted API-only validation, with no checkout or project execution.
+      - id: source
+        uses: truiem/keycloak-operator/.github/actions/image-publication@6315c756cbe6eec965acc8e0990d5fe986102ab7
+        with:
+          token: ${{ github.token }}
+          registry: ${{ inputs.registry }}
+          build-workflow: ${{ inputs.build-workflow }}
+          image-artifact: ${{ inputs.image-artifact }}
+  publish:
+    needs: validate
+    if: github.event_name == 'workflow_run' && needs.validate.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    environment: ${{ needs.validate.outputs.environment }}
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      packages: write
+      id-token: write
+    env:
+      REGISTRY_KIND: ${{ inputs.registry }}
+      IMAGE_NAME: ${{ inputs.image-name }}
+      IMAGE_TAG: ${{ format('{0}{1}', inputs.tag-prefix, needs.validate.outputs.tag) }}
+      ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+      OWNER: ${{ github.repository_owner }}
+    steps:
+      # Approval may take time: reject a superseded PR/tag/run before acquiring
+      # registry credentials. The publisher never executes PR or artifact code.
+      - id: current
+        uses: truiem/keycloak-operator/.github/actions/image-publication@6315c756cbe6eec965acc8e0990d5fe986102ab7
+        with:
+          token: ${{ github.token }}
+          registry: ${{ inputs.registry }}
+          build-workflow: ${{ inputs.build-workflow }}
+          image-artifact: ${{ inputs.image-artifact }}
+      - name: Require the approved immutable artifact and destination
+        env:
+          CURRENT_READY: ${{ steps.current.outputs.ready }}
+          CURRENT_ENVIRONMENT: ${{ steps.current.outputs.environment }}
+          APPROVED_ENVIRONMENT: ${{ needs.validate.outputs.environment }}
+          CURRENT_ARTIFACT: ${{ steps.current.outputs.artifact-id }}
+          APPROVED_ARTIFACT: ${{ needs.validate.outputs.artifact-id }}
+          CURRENT_TAG: ${{ steps.current.outputs.tag }}
+          SOURCE_TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          [[ "$CURRENT_READY" == true && "$CURRENT_ENVIRONMENT" == "$APPROVED_ENVIRONMENT" ]]
+          [[ "$CURRENT_ARTIFACT" == "$APPROVED_ARTIFACT" && "$CURRENT_TAG" == "$SOURCE_TAG" ]]
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.validate.outputs.artifact-id }}
+          run-id: ${{ needs.validate.outputs.run-id }}
+          github-token: ${{ github.token }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/image
+      - name: Validate destination
+        run: |
+          [[ "$REGISTRY_KIND" == ghcr || "$REGISTRY_KIND" == ecr ]]
+          [[ "$IMAGE_NAME" =~ ^[a-z0-9][a-z0-9._/-]*$ && "$IMAGE_NAME" != *..* ]]
+          [[ "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]
+          if [[ "$REGISTRY_KIND" == ecr ]]; then
+            [[ "$ECR_REGISTRY" =~ ^[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com$ ]]
+          fi
+      - name: Install image-copy tool
+        run: sudo apt-get update -qq && sudo apt-get install -y skopeo
+      - name: Assume AWS publishing role
+        if: inputs.registry == 'ecr'
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+          role-session-name: gha-image-publish
+      - name: Publish and verify image digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          export REGISTRY_AUTH_FILE="$RUNNER_TEMP/registry-auth.json"
+          trap 'rm -f "$REGISTRY_AUTH_FILE"' EXIT
+          if [[ "$REGISTRY_KIND" == ghcr ]]; then
+            registry=ghcr.io
+            printf '%s' "$GH_TOKEN" | skopeo login --username "$GITHUB_ACTOR" --password-stdin "$registry"
+            destination="$registry/${OWNER,,}/$IMAGE_NAME:$IMAGE_TAG"
+          else
+            registry="$ECR_REGISTRY"
+            aws ecr get-login-password | skopeo login --username AWS --password-stdin "$registry"
+            destination="$registry/$IMAGE_NAME:$IMAGE_TAG"
+          fi
+          skopeo copy --all --digestfile "$RUNNER_TEMP/published-digest" "oci-archive:$RUNNER_TEMP/image/image.tar" "docker://$destination"
+          skopeo inspect --raw "docker://$destination" > "$RUNNER_TEMP/published-manifest"
+          actual="sha256:$(sha256sum "$RUNNER_TEMP/published-manifest" | cut -d ' ' -f 1)"
+          [[ "$actual" == "$(cat "$RUNNER_TEMP/published-digest")" ]]
+          printf 'Published `%s` at `%s`\n' "$destination" "$actual" >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify GHCR repository association
+        if: inputs.registry == 'ghcr'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          encoded="$(python3 -c 'import os,urllib.parse; print(urllib.parse.quote(os.environ["IMAGE_NAME"], safe=""))')"
+          for attempt in 1 2 3 4 5 6; do
+            linked="$(gh api "orgs/$OWNER/packages/container/$encoded" --jq '.repository.full_name' || true)"
+            if [[ "$linked" == "$GITHUB_REPOSITORY" ]]; then
+              printf 'GHCR package linked to `%s`\n' "$linked" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "GHCR package is not associated with $GITHUB_REPOSITORY" >&2
+          exit 1
