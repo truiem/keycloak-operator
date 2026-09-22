@@ -11,7 +11,7 @@ RUN cd /src && \
 FROM registry.access.redhat.com/ubi8/ubi-minimal:latest
 
 ##LABELS
-LABEL org.opencontainers.image.source=https://github.com/gulfcoastdevops/keycloak-operator
+LABEL org.opencontainers.image.source=https://github.com/truiem/keycloak-operator
 
 RUN microdnf update && microdnf clean all && rm -rf /var/cache/yum/*
 
