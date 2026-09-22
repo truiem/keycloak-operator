@@ -1,0 +1,47 @@
+name: Validate image publication
+description: Bind publication to a successful current PR build or an exact release tag.
+inputs:
+  token:
+    required: true
+    description: Built-in read-only API token
+  registry:
+    required: true
+    description: ghcr or ecr
+  build-workflow:
+    required: true
+    description: Expected source workflow path
+  image-artifact:
+    required: true
+    description: Exact image artifact name
+outputs:
+  ready:
+    value: ${{ steps.validate.outputs.ready }}
+    description: Whether the source qualifies for publication
+  environment:
+    value: ${{ steps.validate.outputs.environment }}
+    description: Protected destination environment
+  tag:
+    value: ${{ steps.validate.outputs.tag }}
+    description: Validated image tag
+  artifact-id:
+    value: ${{ steps.validate.outputs.artifact-id }}
+    description: Exact artifact ID
+  run-id:
+    value: ${{ steps.validate.outputs.run-id }}
+    description: Exact source run ID
+  sha:
+    value: ${{ steps.validate.outputs.sha }}
+    description: Validated build head
+runs:
+  using: composite
+  steps:
+    # This pinned action executes its own code, never anything from the PR/artifact.
+    - id: validate
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REGISTRY_KIND: ${{ inputs.registry }}
+        BUILD_WORKFLOW: ${{ inputs.build-workflow }}
+        IMAGE_ARTIFACT: ${{ inputs.image-artifact }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: python3 "$ACTION_PATH/validate.py"
