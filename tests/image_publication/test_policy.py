@@ -13,7 +13,9 @@ class ImagePublicationPolicy(unittest.TestCase):
         ci, publication = read('ci.yml'), read('publish-images.yml')
         self.assertEqual(publication['on'], {'workflow_run': {'workflows': [ci['name']], 'types': ['completed']}})
         routes = {}
-        for job in publication['jobs'].values():
+        for name, job in publication['jobs'].items():
+            if name == 'cleanup':
+                continue
             self.assertNotIn('steps', job)
             self.assertNotIn('secrets', job)
             if job['uses'].startswith('truiem/'):
@@ -26,6 +28,16 @@ class ImagePublicationPolicy(unittest.TestCase):
             routes.setdefault(job['with']['image-artifact'], set()).add(job['with']['registry'])
         self.assertEqual(set(routes), set(EXPECTED_ARTIFACTS))
         self.assertTrue(all(destinations == {'ecr', 'ghcr'} for destinations in routes.values()))
+
+    def test_cleanup_waits_for_all_destinations(self):
+        publication = read('publish-images.yml')
+        cleanup = publication['jobs']['cleanup']
+        self.assertEqual(set(cleanup['needs']), set(publication['jobs']) - {'cleanup'})
+        self.assertNotIn('if', cleanup)  # Default success gating preserves artifacts after any failed push.
+        self.assertEqual(cleanup['permissions'], {'actions': 'write'})
+        self.assertEqual(set(cleanup['with']['artifact-names'].split()), set(EXPECTED_ARTIFACTS))
+        self.assertIn('cleanup-images-v2.yml', cleanup['uses'])
+        self.assertNotIn('secrets', cleanup)
 
     def test_build_workflow_cannot_push_images(self):
         ci = read('ci.yml')

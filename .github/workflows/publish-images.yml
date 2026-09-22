@@ -1,4 +1,4 @@
-# Trusted follow-up: PR artifacts go to ECR dev/GHCR; version tags go to ECR prod.
+# Delete temporary images only after every registry publisher succeeds.
 name: Publish validated images
 'on':
   workflow_run:
@@ -27,3 +27,12 @@ jobs:
       image-artifact: image
       image-name: keycloak-operator
       build-workflow: .github/workflows/ci.yml
+  cleanup:
+    needs:
+    - keycloak-operator-ecr
+    - keycloak-operator-ghcr
+    permissions:
+      actions: write
+    uses: ./.github/workflows/cleanup-images-v2.yml
+    with:
+      artifact-names: image
