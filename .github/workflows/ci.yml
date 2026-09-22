@@ -1,0 +1,200 @@
+# PR CI publishes QA images before merge; tags additionally publish to production.
+name: Public fork CI
+'on':
+  pull_request: null
+  push:
+    branches:
+    - main
+    tags:
+    - v*
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        fetch-depth: '0'
+        persist-credentials: 'false'
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+      with:
+        go-version: 1.26.6
+        cache: 'false'
+    - name: Unit and permission tests
+      run: 'go test ./pkg/...
+
+        python3 -m unittest discover -s tests/migration -v'
+    - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94
+      with:
+        version: v2.18.2
+        args: release --clean --skip=publish,before ${{ !startsWith(github.ref, 'refs/tags/') && '--snapshot' || '' }}
+    - run: tar -cf release.tar dist/
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: build-artifacts
+        path: release.tar
+        if-no-files-found: error
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: release-assets
+        path: 'dist/*.tar.gz
+
+          dist/*.zip
+
+          dist/*checksums.txt'
+        if-no-files-found: error
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    strategy:
+      matrix:
+        language:
+        - go
+        - actions
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: 'false'
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+      with:
+        go-version: 1.26.6
+        cache: 'false'
+    - uses: github/codeql-action/init@1c5b675653bb5c22dbe9b12b556ec555138e09fd
+      with:
+        languages: ${{ matrix.language }}
+        build-mode: ${{ matrix.language == 'go' && 'manual' || 'none' }}
+    - if: matrix.language == 'go'
+      run: go build ./cmd/... ./pkg/...
+    - uses: github/codeql-action/analyze@1c5b675653bb5c22dbe9b12b556ec555138e09fd
+  image:
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.value }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: 'false'
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        name: build-artifacts
+    - run: tar -xf release.tar
+    - name: Select unchanged image tag convention
+      id: tag
+      run: "tag=\"sha-${GITHUB_SHA:0:7}\"\nif [[ \"$GITHUB_REF\" == refs/tags/v* ]]; then\n tag=\"${GITHUB_REF_NAME#v}\"\n\
+        \ [[ \"$tag\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]\nfi\necho \"value=$tag\" >> \"$GITHUB_OUTPUT\""
+    - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+    - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+      with:
+        context: ./dist/keycloak-operator_linux_amd64_v1
+        file: ./hack/goreleaser/Dockerfile
+        platforms: linux/amd64
+        push: 'false'
+        outputs: type=oci,dest=${{ runner.temp }}/image.tar
+        labels: 'org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+          org.opencontainers.image.revision=${{ github.sha }}
+
+          org.opencontainers.image.url=https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          '
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: image
+        path: ${{ runner.temp }}/image.tar
+        if-no-files-found: error
+        retention-days: '1'
+    env:
+      DOCKER_BUILD_RECORD_UPLOAD: 'false'
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs:
+    - build
+    - codeql
+    - image
+    runs-on: ubuntu-latest
+    environment: publish-release
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        name: release-assets
+        path: release-assets
+    - env:
+        GH_TOKEN: ${{ github.token }}
+      run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes release-assets/*
+  image-publication-policy:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: 'false'
+    - name: Test image publication routes and credential boundaries
+      run: 'python3 -m pip install PyYAML==6.0.3
+
+        python3 -m unittest discover -s tests/image_publication -v'
+  publish-image-dev:
+    needs: &id001
+    - build
+    - codeql
+    - image
+    - image-publication-policy
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+      id-token: write
+    uses: ./.github/workflows/publish-current-image-v2.yml
+    with:
+      registry: ecr
+      environment: publish-ecr-dev
+      image-artifact: image
+      image-name: keycloak-operator
+      image-tag: ${{ needs.image.outputs.tag }}
+  publish-image-ghcr:
+    needs: *id001
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+      id-token: write
+    uses: ./.github/workflows/publish-current-image-v2.yml
+    with:
+      registry: ghcr
+      environment: publish-ghcr
+      image-artifact: image
+      image-name: keycloak-operator
+      image-tag: ${{ needs.image.outputs.tag }}
+  publish-image-prod:
+    needs: *id001
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+      id-token: write
+    uses: ./.github/workflows/publish-current-image-v2.yml
+    with:
+      registry: ecr
+      environment: publish-ecr-prod
+      image-artifact: image
+      image-name: keycloak-operator
+      image-tag: ${{ needs.image.outputs.tag }}
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+  cleanup-images:
+    needs:
+    - publish-image-dev
+    - publish-image-ghcr
+    - publish-image-prod
+    if: always() && !cancelled() && needs['publish-image-dev'].result == 'success' && needs['publish-image-ghcr'].result ==
+      'success' && (needs['publish-image-prod'].result == 'success' || needs['publish-image-prod'].result == 'skipped')
+    permissions:
+      contents: read
+      actions: write
+    uses: ./.github/workflows/cleanup-current-images-v2.yml
+    with:
+      artifact-names: image

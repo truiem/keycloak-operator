@@ -1,0 +1,33 @@
+# Caller gates this job on successful publication to every required registry.
+name: Remove published images from current run
+'on':
+  workflow_call:
+    inputs:
+      artifact-names:
+        description: Exact newline-separated names of images successfully published to every destination
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+    - name: Delete only this source run's published images
+      env:
+        GH_TOKEN: ${{ github.token }}
+        ARTIFACT_NAMES: ${{ inputs.artifact-names }}
+      shell: python
+      run: "import json, os, subprocess\nevent = json.load(open(os.environ['GITHUB_EVENT_PATH']))\nsource = {'id': int(os.environ['GITHUB_RUN_ID']),\
+        \ 'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT'])}\nrepo = event['repository']\nnames = set(os.environ['ARTIFACT_NAMES'].split())\n\
+        if not names or any('/' in name or '*' in name for name in names):\n    raise ValueError('Exact artifact names are\
+        \ required')\ndef api(path, method='GET'):\n    result = subprocess.check_output(['gh', 'api', '--method', method,\
+        \ path], text=True)\n    return json.loads(result) if result else None\nprefix = 'repos/' + repo['full_name'] + '/actions/'\n\
+        current = api(prefix + 'runs/' + str(source['id']))\n# A retry may need these files; fail closed if the source changed.\n\
+        if current['id'] != source['id'] or current['run_attempt'] != source['run_attempt']:\n    raise ValueError('Source\
+        \ run changed; retaining artifacts')\nartifacts = []\npage = 1\nwhile True:\n    batch = api(prefix + 'runs/' + str(source['id'])\
+        \ + '/artifacts?per_page=100&page=' + str(page))['artifacts']\n    artifacts.extend(a for a in batch if a['name']\
+        \ in names and not a['expired'])\n    if len(batch) < 100:\n        break\n    page += 1\nfor artifact in artifacts:\n\
+        \    api(prefix + 'artifacts/' + str(artifact['id']), 'DELETE')\n    print('Deleted published image artifact', artifact['name'])\n"

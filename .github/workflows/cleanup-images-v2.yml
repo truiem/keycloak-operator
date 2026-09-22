@@ -1,0 +1,52 @@
+name: Remove published image artifacts
+on:
+  workflow_call:
+    inputs:
+      artifact-names:
+        description: Exact newline-separated names of images successfully published to every destination
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  cleanup:
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      # Caller must depend on every registry publisher. Never execute artifact data.
+      - name: Delete only this source run's published images
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_NAMES: ${{ inputs.artifact-names }}
+        shell: python
+        run: |
+          import json, os, subprocess
+          event = json.load(open(os.environ['GITHUB_EVENT_PATH']))
+          source = event['workflow_run']
+          repo = event['repository']
+          if source['repository']['id'] != repo['id'] or source['head_repository']['id'] != repo['id']:
+              raise ValueError('Cleanup requires a same-repository build')
+          names = set(os.environ['ARTIFACT_NAMES'].split())
+          if not names or any('/' in name or '*' in name for name in names):
+              raise ValueError('Exact artifact names are required')
+          def api(path, method='GET'):
+              result = subprocess.check_output(['gh', 'api', '--method', method, path], text=True)
+              return json.loads(result) if result else None
+          prefix = 'repos/' + repo['full_name'] + '/actions/'
+          current = api(prefix + 'runs/' + str(source['id']))
+          # A retry may need these files; fail closed if the source changed.
+          if current['status'] != 'completed' or current['conclusion'] != 'success' or current['run_attempt'] != source['run_attempt']:
+              raise ValueError('Source run changed; retaining artifacts')
+          artifacts = []
+          page = 1
+          while True:
+              batch = api(prefix + 'runs/' + str(source['id']) + '/artifacts?per_page=100&page=' + str(page))['artifacts']
+              artifacts.extend(a for a in batch if a['name'] in names and not a['expired'])
+              if len(batch) < 100:
+                  break
+              page += 1
+          for artifact in artifacts:
+              api(prefix + 'artifacts/' + str(artifact['id']), 'DELETE')
+              print('Deleted published image artifact', artifact['name'])
