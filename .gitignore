@@ -31,3 +31,6 @@ deploy/empty-init.yaml
 # IDE files
 .idea
 .vscode
+
+# Policy-test bytecode must not dirty tagged GoReleaser checkouts.
+__pycache__/
