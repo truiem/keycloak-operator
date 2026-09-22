@@ -1,4 +1,4 @@
-# Public fork: private reusable workflows are inaccessible. Keep credential-free builds separate from protected publishers.
+# Public fork uses isolated jobs because the organization workflow library is private.
 name: Public fork CI
 'on':
   pull_request: null
@@ -69,7 +69,7 @@ jobs:
         languages: ${{ matrix.language }}
         build-mode: ${{ matrix.language == 'go' && 'manual' || 'none' }}
     - if: matrix.language == 'go'
-      run: go build ./...
+      run: go build ./cmd/... ./pkg/...
     - uses: github/codeql-action/analyze@1c5b675653bb5c22dbe9b12b556ec555138e09fd
   image:
     needs: build
@@ -113,7 +113,6 @@ jobs:
     environment: publish-ecr-dev
     permissions:
       contents: read
-      packages: write
       id-token: write
     steps:
     - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
@@ -147,7 +146,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write
     steps:
     - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
       with:
